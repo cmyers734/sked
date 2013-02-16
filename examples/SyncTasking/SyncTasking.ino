@@ -6,11 +6,11 @@
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("\n--- Preemptive Tasking Example ---\n");
+  Serial.println("\n--- Synchronous Tasking Example ---\n");
  
   pinMode(LED, OUTPUT);
   
-  tasker.init(TASKER_MODE_PREEMPTIVE, SRC_TIMER1);
+  tasker.init(TASKER_MODE_NON_PREEMPTIVE, SRC_TIMER1);
   tasker.schedule(1000000, 0, 0, task_1s);
   tasker.schedule(500000, 200000, 0, task_500ms_phased_200ms);
 
@@ -18,6 +18,7 @@ void setup() {
 }
 
 void loop() {
+	tasker.loop();
 }
 
 void task_1s(void) {

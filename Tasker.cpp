@@ -41,11 +41,13 @@ Tasker::Tasker(void) {
     _max_period_us = 0U;
     _state = TASKER_STATE_UNINIT;
     _current_task_priority = TASKER_MIN_PRIORITY;
+    _mode = TASKER_MODE_PREEMPTIVE;
 }
 
-int8_t Tasker::init(tasker_clk_src_e clk_src) {
+int8_t Tasker::init(tasker_mode_e mode, tasker_clk_src_e clk_src) {
     int8_t ret = TASKER_E_OK;
 
+    _mode = mode;
     _clk_src = clk_src;
     
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
@@ -84,6 +86,35 @@ int8_t Tasker::init(tasker_clk_src_e clk_src) {
     }
 
     return ret;
+}
+
+void Tasker::loop(void) {
+    if (_mode == TASKER_MODE_NON_PREEMPTIVE) {
+        /* Search for a task that is ready to run and execute it */
+        for (uint8_t i = 0; i < _task_count; i++) {
+            tasker_task_t *task = &_tasks[i];
+
+            ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+                /* We can run a task when it's READY. We can neglect priority
+                 * because we sorted tasks by priority upon their insertion into
+                 * the task list. By iterating through the tasks from
+                 * 0->_task_count, we'll be honoring the priority by running the
+                 * READY tasks according to priority. */
+                if (task->state == READY) {
+                    task->state = RUNNING;
+
+                    /* Enable interrupts to allow for the tick interrupt to occur
+                     * again (as well as other interrupts) during the task function's
+                     * execution. */
+                    NONATOMIC_BLOCK(NONATOMIC_RESTORESTATE) {
+                        task->fcn();
+                    }
+
+                    task->state = IDLE;
+                }
+            } /* End of atomic block */
+        }
+    }
 }
 
 void Tasker::timerISR(void) {
@@ -130,32 +161,34 @@ void Tasker::timerISR(void) {
         }
     }
 
-    /* After we update our state, it's time to execute an available task */
-    for (uint8_t i = 0; i < _task_count; i++) {
-        tasker_task_t *task = &_tasks[i];
+    if (_mode == TASKER_MODE_PREEMPTIVE) {
+        /* After we update our state, it's time to execute an available task */
+        for (uint8_t i = 0; i < _task_count; i++) {
+            tasker_task_t *task = &_tasks[i];
 
-        /* We can run a task when it's ready and is of higher priority than
-         * the task we're running already. */
-        if ((task->state == READY) && (task->priority > _current_task_priority)) {
-            task->state = RUNNING;
+            /* We can run a task when it's ready and is of higher priority than
+             * the task we're running already. */
+            if ((task->state == READY) && (task->priority > _current_task_priority)) {
+                task->state = RUNNING;
 
-            /* Record the priority so we don't let other lower-prio tasks
-             * interrupt us */
-            _current_task_priority = task->priority;
+                /* Record the priority so we don't let other lower-prio tasks
+                 * interrupt us */
+                _current_task_priority = task->priority;
 
-            /* Enable interrupts to allow for the tick interrupt to occur
-             * again (as well as other interrupts) during the task function's
-             * execution. */
-            NONATOMIC_BLOCK(NONATOMIC_RESTORESTATE) {
-                task->fcn();
+                /* Enable interrupts to allow for the tick interrupt to occur
+                 * again (as well as other interrupts) during the task function's
+                 * execution. */
+                NONATOMIC_BLOCK(NONATOMIC_RESTORESTATE) {
+                    task->fcn();
+                }
+
+                /* Important! Reset the priority back to the lowest possible or
+                 * else you'll never execute any tasks with lower priority than
+                 * the one we just ran. */
+                _current_task_priority = TASKER_MIN_PRIORITY;
+                
+                task->state = IDLE;
             }
-
-            /* Important! Reset the priority back to the lowest possible or
-             * else you'll never execute any tasks with lower priority than
-             * the one we just ran. */
-            _current_task_priority = TASKER_MIN_PRIORITY;
-            
-            task->state = IDLE;
         }
     }
 }

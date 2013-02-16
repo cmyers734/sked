@@ -12,6 +12,7 @@
 #define TASKER_E_INVALID_FUNCTION -4
 #define TASKER_E_INVALID_PHASE -5
 #define TASKER_E_INVALID_PRIORITY -6
+#define TASKER_E_INVALID_OPERATION -7
 #define TASKER_E_NOT_IMPLEMENTED -99
 
 #define TASKER_OVERRUNS_MAX 255U
@@ -28,6 +29,11 @@ typedef enum {
 typedef enum {
 	SRC_TIMER1 = 0,
 } tasker_clk_src_e;
+
+typedef enum {
+	TASKER_MODE_PREEMPTIVE = 0,
+	TASKER_MODE_NON_PREEMPTIVE,
+} tasker_mode_e;
 
 typedef void (*tasker_task_fcn_t)(void);
 
@@ -50,15 +56,17 @@ private:
 	tasker_task_t _tasks[TASKER_MAX_TASKS];
 	uint8_t _task_count;
 	int8_t _current_task_priority;
+	tasker_mode_e _mode;
 
 public:
 	Tasker();
 	void debugPrintState(Stream *stream);
-	int8_t init(tasker_clk_src_e clk_src);
+	int8_t init(tasker_mode_e mode, tasker_clk_src_e clk_src);
 	int8_t schedule(uint32_t period_us, uint32_t phase, int8_t priority, 
         tasker_task_fcn_t fcn);
 	void timerISR(void);
 	int8_t start(void);
+	void loop(void);
 };
 
 extern Tasker tasker;

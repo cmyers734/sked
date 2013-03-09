@@ -1,8 +1,8 @@
 /**
- * Tasking library for Arduino.
+ * Sked: Task scheduling library for Arduino.
  *
- * This library provides asynchronous task execution for the Uno Arduino 
- * platform, although it's possible that this works just fine on other
+ * This library provides both preemptive and non-preemptive task execution for the 
+ * Uno Arduino  platform, although it's possible that this works just fine on other
  * boards.
  * 
  * This scheduler is:
@@ -21,31 +21,25 @@
  */
 
 #include <util/atomic.h>
-#include "Tasker.h"
+#include "Sked.h"
 
 /* Fixed 100us tick resolution */
-#define TASKER_TIMER1_CLK_HZ (8.0/(float)F_CPU)
-#define TASKER_TIMER1_TICK_PERIOD_S 0.000100
-#define TASKER_TIMER1_TICK_PERIOD_US (TASKER_TIMER1_TICK_PERIOD_S * 1000000.0)
+#define SKED_TIMER1_CLK_HZ (8.0/(float)F_CPU)
+#define SKED_TIMER1_TICK_PERIOD_S 0.000100
+#define SKED_TIMER1_TICK_PERIOD_US (SKED_TIMER1_TICK_PERIOD_S * 1000000.0)
 /* The number of ticks needed for TIMER1 to expire at the desired period */
-#define TASKER_TIMER1_TICKS_PER_PERIOD (TASKER_TIMER1_TICK_PERIOD_S / TASKER_TIMER1_CLK_HZ)
+#define SKED_TIMER1_TICKS_PER_PERIOD (SKED_TIMER1_TICK_PERIOD_S / SKED_TIMER1_CLK_HZ)
 
-/* Different states the tasker can be in */
-#define TASKER_STATE_UNINIT 0
-#define TASKER_STATE_INIT 1
+/* Different states the sked can be in */
+#define SKED_STATE_UNINIT 0
+#define SKED_STATE_INIT 1
 
-Tasker::Tasker(void) {
-    /* Don't bother to initialize any of the task slots because _task_count
-     * determines which are valid. */
-    _task_count = 0U;
-    _max_period_us = 0U;
-    _state = TASKER_STATE_UNINIT;
-    _current_task_priority = TASKER_MIN_PRIORITY;
-    _mode = TASKER_MODE_PREEMPTIVE;
+Sked::Sked(void) {
+    reset();
 }
 
-int8_t Tasker::init(tasker_mode_e mode, tasker_clk_src_e clk_src) {
-    int8_t ret = TASKER_E_OK;
+int8_t Sked::init(sked_mode_e mode, sked_clk_src_e clk_src) {
+    int8_t ret = SKED_E_OK;
 
     _mode = mode;
     _clk_src = clk_src;
@@ -54,7 +48,8 @@ int8_t Tasker::init(tasker_mode_e mode, tasker_clk_src_e clk_src) {
         if (_clk_src == SRC_TIMER1) {
             /* Maximum number of us that can fit in 16-bit counter */
             _max_period_us = (uint32_t)((float)0xFFFF 
-                    * TASKER_TIMER1_TICK_PERIOD_US);
+                    * SKED_TIMER1_TICK_PERIOD_US);
+            _min_period_us = SKED_TIMER1_TICK_PERIOD_US;
 
             /* Set Initial Timer value */
             TCNT1 = 0x0000U;
@@ -72,27 +67,31 @@ int8_t Tasker::init(tasker_mode_e mode, tasker_clk_src_e clk_src) {
              * 16MHz and a prescaler of /8, each tick is 500ns.  Since we don't
              * want an interrupt every 500ns, targeting every 100us would mean
              * an interrupt every 200 counts instead. This also means that all
-             * periods and phases need to be even multiples of 100us. */
-            ICR1 = (uint16_t)TASKER_TIMER1_TICKS_PER_PERIOD;
+             * periods and offsets need to be even multiples of 100us. */
+            ICR1 = (uint16_t)(SKED_TIMER1_TICKS_PER_PERIOD-1);
             
             /* Interrupt in mode 12 will set the TIRF1 flag, leave disabled
              * until the call to start() */
             TIMSK1 = 0x00;
         
-            _state = TASKER_STATE_INIT;
+            _state = SKED_STATE_INIT;
         } else {
-            ret = TASKER_E_NOT_IMPLEMENTED;
+            ret = SKED_E_NOT_IMPLEMENTED;
         }
     }
 
     return ret;
 }
 
-void Tasker::loop(void) {
-    if (_mode == TASKER_MODE_NON_PREEMPTIVE) {
+int8_t Sked::loop(void) {
+    if (_state == SKED_STATE_UNINIT) {
+        return SKED_E_NOT_INITIALIZED;
+    }
+
+    if (_mode == SKED_MODE_NON_PREEMPTIVE) {
         /* Search for a task that is ready to run and execute it */
         for (uint8_t i = 0; i < _task_count; i++) {
-            tasker_task_t *task = &_tasks[i];
+            sked_task_t *task = &_tasks[i];
 
             ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
                 /* We can run a task when it's READY. We can neglect priority
@@ -117,10 +116,10 @@ void Tasker::loop(void) {
     }
 }
 
-void Tasker::timerISR(void) {
+void Sked::timerISR(void) {
     /* This occurs periodically. Walk through each task and update its state. */
     for (uint8_t i = 0; i < _task_count; i++) {
-        tasker_task_t *task = &_tasks[i];
+        sked_task_t *task = &_tasks[i];
 
         /* Each task has a count which we decrement if we can */
         if (task->count != 0) {
@@ -143,28 +142,28 @@ void Tasker::timerISR(void) {
                 task->state = READY;
             } else if (task->state == RUNNING) {
                 /* Overrun */
-                task->overruns = constrain(TASKER_OVERRUNS_MAX, 
+                task->overruns = constrain(SKED_OVERRUNS_MAX, 
                         0, task->overruns+1);
             } else {
                 /* Miss! */
-                task->misses = constrain(TASKER_MISSES_MAX, 
+                task->misses = constrain(SKED_MISSES_MAX, 
                         0, task->misses+1);
             }
             
             /* Reset the count back to the period. You'll note that we don't
-             * care about the phase. Since that was baked in when the task was
-             * scheduled, it meant that its first period was phased
+             * care about the offset. Since that was baked in when the task was
+             * scheduled, it meant that its first period was offset
              * differently and thus this task will continue to have the 
-             * phase baked into each subsequent period without worrying about
+             * offset baked into each subsequent period without worrying about
              * it. */
             task->count = task->period;
         }
     }
 
-    if (_mode == TASKER_MODE_PREEMPTIVE) {
+    if (_mode == SKED_MODE_PREEMPTIVE) {
         /* After we update our state, it's time to execute an available task */
         for (uint8_t i = 0; i < _task_count; i++) {
-            tasker_task_t *task = &_tasks[i];
+            sked_task_t *task = &_tasks[i];
 
             /* We can run a task when it's ready and is of higher priority than
              * the task we're running already. */
@@ -185,7 +184,7 @@ void Tasker::timerISR(void) {
                 /* Important! Reset the priority back to the lowest possible or
                  * else you'll never execute any tasks with lower priority than
                  * the one we just ran. */
-                _current_task_priority = TASKER_MIN_PRIORITY;
+                _current_task_priority = SKED_MIN_PRIORITY;
                 
                 task->state = IDLE;
             }
@@ -193,11 +192,11 @@ void Tasker::timerISR(void) {
     }
 }
 
-void Tasker::debugPrintState(Stream *stream) {
-    if (_state == TASKER_STATE_UNINIT) {
-        stream->println("### Tasker is UNINITIALIZED.");
+void Sked::debugPrintState(Stream *stream) {
+    if (_state == SKED_STATE_UNINIT) {
+        stream->println("### Sked is UNINITIALIZED.");
     } else {
-        stream->println("### Tasker is INITIALIZED.");
+        stream->println("### Sked is INITIALIZED.");
         stream->print("### Max Period (us): ");
         stream->println(_max_period_us);
         stream->print("### Src Timer:       ");
@@ -215,7 +214,7 @@ void Tasker::debugPrintState(Stream *stream) {
                 stream->print("###    TIMSK1:    ");
                 stream->println(TIMSK1, HEX);
                 stream->print("###    Ticks Per Period: ");
-                stream->println(TASKER_TIMER1_TICKS_PER_PERIOD);
+                stream->println(SKED_TIMER1_TICKS_PER_PERIOD);
                 break;
             
             default:
@@ -225,7 +224,7 @@ void Tasker::debugPrintState(Stream *stream) {
 
         stream->print("### Tasks: "); stream->println(_task_count);
         for (uint8_t i = 0; i < _task_count; i++) {
-            tasker_task_t *task = &_tasks[i];
+            sked_task_t *task = &_tasks[i];
         
             stream->print("###   Task["); stream->print(i); stream->print("]: ");
             stream->print("(");
@@ -233,7 +232,7 @@ void Tasker::debugPrintState(Stream *stream) {
             stream->print(", ");
             stream->print(task->period);
             stream->print(", ");
-            stream->print(task->phase);
+            stream->print(task->offset);
             stream->print(", ");
             stream->print(task->count);
             stream->print(", ");
@@ -249,46 +248,50 @@ void Tasker::debugPrintState(Stream *stream) {
     }
 }
 
-int8_t Tasker::schedule(uint32_t period_us, uint32_t phase_us, int8_t priority, 
-        tasker_task_fcn_t fcn) {
+int8_t Sked::schedule(uint32_t period_us, uint32_t offset_us, int8_t priority, 
+        sked_task_fcn_t fcn) {
     uint16_t period;
-    uint16_t phase;
+    uint16_t offset;
+
+    /* Have to initialize first to get proper bounds */
+    if (_state == SKED_STATE_UNINIT) {
+        return SKED_E_NOT_INITIALIZED;
+    }
 
     /* We may be full */
-    if (_task_count >= TASKER_MAX_TASKS) {
-        return TASKER_E_TOO_MANY_TASKS;
+    if (_task_count >= SKED_MAX_TASKS) {
+        return SKED_E_TOO_MANY_TASKS;
     }
 
-    /* Check period and phase:
-     *  Both must be less than the max.
-     *  The period has to be greater than 0 
-     *  The phase must be less than the period. */
-    if (period_us == 0 || period_us > _max_period_us) {
-        return TASKER_E_INVALID_PERIOD;
+    /* Check period and offset:
+     *  Both must be less than the max and greater than the min (except for
+     *  the offset, which can be 0, but if it's greater than 0, it should be
+     *  greater than 100).
+     */
+    if (period_us > _max_period_us || period_us < _min_period_us) {
+        return SKED_E_INVALID_PERIOD;
     }
 
-    /* Don't need to check that the phase exceeds the max because if it did,
-     * then the period would have also exceeded them max and we would have
-     * caught that in the above check. */
-    if (phase_us > period_us) {
-        return TASKER_E_INVALID_PHASE;
+    if (offset_us > _max_period_us 
+            || (offset_us > 0 && offset_us < _min_period_us)) {
+        return SKED_E_INVALID_OFFSET;
     }
 
     /* Priority needs to be > -127 (which we use to designate the lowest
      * possible priority)
      */
-    if (priority <= (int8_t)TASKER_MIN_PRIORITY) {
-        return TASKER_E_INVALID_PRIORITY;
+    if (priority <= (int8_t)SKED_MIN_PRIORITY) {
+        return SKED_E_INVALID_PRIORITY;
     }
 
     /* Task function cannot be NULL */
-    if (fcn == (tasker_task_fcn_t)NULL) {
-        return TASKER_E_INVALID_FUNCTION;
+    if (fcn == (sked_task_fcn_t)NULL) {
+        return SKED_E_INVALID_FUNCTION;
     }
     
-    /* Convert period and phase to ticks of the timer ISR */
-    period = period_us / (uint32_t)(TASKER_TIMER1_TICK_PERIOD_US);
-    phase = phase_us / (uint32_t)(TASKER_TIMER1_TICK_PERIOD_US);
+    /* Convert period and offset to ticks of the timer ISR */
+    period = period_us / (uint32_t)(SKED_TIMER1_TICK_PERIOD_US);
+    offset = offset_us / (uint32_t)(SKED_TIMER1_TICK_PERIOD_US);
 
     /* Make sure to disable interrupts lest we get a tick interrupt right as
      * we're adding a new task. */
@@ -306,7 +309,7 @@ int8_t Tasker::schedule(uint32_t period_us, uint32_t phase_us, int8_t priority,
          * to change priorities on the fly (not just on insertion) */
         uint8_t insertion_index = _task_count;
         for (uint8_t i = 0; i < _task_count; i++) {
-            tasker_task_t *task = &_tasks[i];
+            sked_task_t *task = &_tasks[i];
 
             if (task->priority < priority) {
                 /* This is where we need to insert */
@@ -334,27 +337,62 @@ int8_t Tasker::schedule(uint32_t period_us, uint32_t phase_us, int8_t priority,
         }
         
         /* Insert the new task */
-        tasker_task_t *new_task = &_tasks[insertion_index];
+        sked_task_t *new_task = &_tasks[insertion_index];
         new_task->state = IDLE;
         new_task->overruns = 0U;
         new_task->misses = 0U;
         new_task->period = period;
-        new_task->phase = phase;
+        new_task->offset = offset;
         new_task->priority = priority;
         new_task->fcn = fcn;
-        /* NOTE: We start the count at the phase. This means that phased tasks
+        /* NOTE: We start the count at the offset. This means that offset tasks
          * will not become ready on the first tick. */
-        new_task->count = phase;
+        new_task->count = offset;
         
         _task_count++;
     } /* End of atomic block */
 
-    return TASKER_E_OK;
+    return SKED_E_OK;
 }
 
-int8_t Tasker::start(void) {
-    if (_state == TASKER_STATE_UNINIT) {
-        return TASKER_E_NOT_INITIALIZED;
+uint8_t Sked::getTaskCount(void) {
+    return _task_count;
+}
+
+sked_task_t *Sked::getTaskInfo(uint8_t i) {
+    if (i < _task_count) {
+        return &_tasks[i];
+    } else {
+        return NULL;
+    }
+}
+
+void Sked::reset(void) {
+    /* Don't bother to initialize any of the task slots because _task_count
+     * determines which are valid. */
+    _task_count = 0U;
+    _max_period_us = 0U;
+    _min_period_us = 0U;
+    _state = SKED_STATE_UNINIT;
+    _current_task_priority = SKED_MIN_PRIORITY;
+    _mode = SKED_MODE_PREEMPTIVE;
+
+    if (_clk_src == SRC_TIMER1) {
+        /* Set Initial Timer value */
+        TCNT1 = 0x0000U;
+
+        /* Interrupt in mode 12 will set the TIRF1 flag, disable with
+         * clear of TIMSK1.ICIE1 (just clear them all for now). */
+        TIMSK1 = 0x00U;
+
+        /* Clear any pending interrupt */
+        TIFR1 = _BV(ICF1);
+    }
+}
+
+int8_t Sked::start(void) {
+    if (_state == SKED_STATE_UNINIT) {
+        return SKED_E_NOT_INITIALIZED;
     }
 
     if (_clk_src == SRC_TIMER1) {
@@ -369,7 +407,7 @@ int8_t Tasker::start(void) {
         TIMSK1 = _BV(ICIE1);
     }
 
-    return TASKER_E_OK;
+    return SKED_E_OK;
 }
 
 /**
@@ -377,9 +415,9 @@ int8_t Tasker::start(void) {
  * table. It executes when TCNT1 matches ICR1 every 100us.
  */
 ISR(TIMER1_CAPT_vect) {
-    tasker.timerISR();
+    sked.timerISR();
 }
 
 /* The intent is that a single scheduler is instantiated. */
-Tasker tasker;
+Sked sked;
 

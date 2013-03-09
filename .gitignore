@@ -1,2 +1,12 @@
 
 *.swp
+
+*.eep
+
+*.hex
+
+*.elf
+
+*.o
+
+.DS_Store

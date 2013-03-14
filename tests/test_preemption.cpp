@@ -1,10 +1,31 @@
 /**
- * Test preemption.
+ * Sked: Task scheduling library for Arduino.
+ *
+ * Copyright (c) 2013, Christopher Myers.  All Rights Reserved.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ *
+ * --------------------------------------------------------------------------
+ *
+ * Tests preemptive behavior
+ *
  */
 
 #include <Sked.h>
-#include "utest.h"
-#include "util.h"
+#include "./utest.h"
+#include "./util.h"
 
 TestSuite ts;
 
@@ -37,16 +58,16 @@ Test(test1, ts) {
 
     times_1s.tstamps = tstamps_1s;
     times_1s.size = 5;
-    
+
     times_5ms.tstamps = tstamps_5ms;
     times_5ms.size = 25;
-    
+
     /* done will be set true in task_1s */
     done = false;
 
     /* Init */
     assertEquals(SKED_E_OK, sked.init(SKED_MODE_PREEMPTIVE, SRC_TIMER1));
-    
+
     /* 1 task @ 1s with a high priority */
     assertEquals(SKED_E_OK, sked.schedule(1000000, 0, 127, task_1s));
     /* 1 task @ 5ms with a lower priority */

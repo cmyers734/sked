@@ -1,7 +1,7 @@
 
 # Use test1 if no TEST (test number) is provided externally
 ifeq ($(TEST),)
-TARGET := test1
+TARGET := test_basics
 else
 TARGET := $(TEST)
 endif
@@ -25,6 +25,14 @@ CXXSRC = $(ARDUINO_CXX_SOURCE) \
 
 # Common rules
 include common.mk
+
+# Turn on debug
+CDEFS += -DSKED_DEBUG=1
+
+
+lint:
+	python ./tools/cpplint.py tests/*.cpp tests/*.h *.cpp
+
 
 test: build
 
